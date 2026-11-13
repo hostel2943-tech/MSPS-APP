@@ -2,29 +2,32 @@
 package com.msps.app
 
 import android.app.Activity
+import android.app.DownloadManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.util.Base64
+import android.os.Environment
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.print.PrintManager
-import android.content.Context
 import android.widget.Toast
-import androidx.activity.ComponentActivity
 
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
-    private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var pendingBackup: ByteArray? = null
 
     companion object {
         private const val FILE_CHOOSER_REQUEST = 1001
         private const val BACKUP_REQUEST = 1002
+        private const val WEBSITE_URL =
+            "https://hostel2943-tech.github.io/MSPS-APP/"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,8 +42,16 @@ class MainActivity : Activity() {
         webView.settings.allowContentAccess = true
 
         webView.addJavascriptInterface(AndroidBridge(), "Android")
+        webView.addJavascriptInterface(AndroidBridge(), "AMUAndroidPrint")
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): Boolean {
+                return false
+            }
+        }
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
@@ -48,20 +59,70 @@ class MainActivity : Activity() {
                 callback: ValueCallback<Array<Uri>>?,
                 params: FileChooserParams?
             ): Boolean {
-                fileCallback?.onReceiveValue(null)
-                fileCallback = callback
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = callback
 
-                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
+                return try {
+                    val intent = params?.createIntent()
+                        ?: Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                        }
+
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST)
+                    true
+                } catch (e: Exception) {
+                    fileChooserCallback?.onReceiveValue(null)
+                    fileChooserCallback = null
+                    false
                 }
-
-                startActivityForResult(intent, FILE_CHOOSER_REQUEST)
-                return true
             }
         }
 
-        webView.loadUrl("file:///android_asset/index.html")
+        webView.setDownloadListener { url, userAgent, contentDisposition,
+                                      mimeType, _ ->
+            try {
+                val request = DownloadManager.Request(Uri.parse(url))
+                val fileName = android.webkit.URLUtil.guessFileName(
+                    url, contentDisposition, mimeType
+                )
+
+                request.setTitle(fileName)
+                request.setDescription("Downloading MSPS file")
+                request.setMimeType(mimeType)
+                request.addRequestHeader("User-Agent", userAgent)
+
+                CookieManager.getInstance().getCookie(url)?.let {
+                    request.addRequestHeader("Cookie", it)
+                }
+
+                request.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+                request.setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS,
+                    fileName
+                )
+
+                val manager =
+                    getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                manager.enqueue(request)
+
+                Toast.makeText(
+                    this, "Download started", Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                Toast.makeText(
+                    this, "Download could not start", Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
+        if (savedInstanceState == null) {
+            webView.loadUrl(WEBSITE_URL)
+        } else {
+            webView.restoreState(savedInstanceState)
+        }
     }
 
     inner class AndroidBridge {
@@ -69,7 +130,8 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun saveBackup(base64Data: String, fileName: String) {
             try {
-                pendingBackup = Base64.decode(base64Data, Base64.DEFAULT)
+                pendingBackup =
+                    android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
 
                 runOnUiThread {
                     val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
@@ -94,13 +156,14 @@ class MainActivity : Activity() {
         fun print() {
             runOnUiThread {
                 val printManager =
-                    getSystemService(Context.PRINT_SERVICE) as PrintManager
+                    getSystemService(Context.PRINT_SERVICE) as android.print.PrintManager
                 val adapter = webView.createPrintDocumentAdapter("MSPS")
                 printManager.print("MSPS", adapter, null)
             }
         }
     }
 
+    @Deprecated("Deprecated in Android API")
     override fun onActivityResult(
         requestCode: Int,
         resultCode: Int,
@@ -114,26 +177,38 @@ class MainActivity : Activity() {
             } else {
                 null
             }
-            fileCallback?.onReceiveValue(result)
-            fileCallback = null
+
+            fileChooserCallback?.onReceiveValue(result)
+            fileChooserCallback = null
         }
 
-        if (requestCode == BACKUP_REQUEST && resultCode == RESULT_OK) {
-            val uri = data?.data
-            if (uri != null && pendingBackup != null) {
+        if (requestCode == BACKUP_REQUEST) {
+            if (resultCode == RESULT_OK && data?.data != null &&
+                pendingBackup != null
+            ) {
                 try {
-                    contentResolver.openOutputStream(uri)?.use {
+                    contentResolver.openOutputStream(data.data!!)?.use {
                         it.write(pendingBackup!!)
                     }
-                    Toast.makeText(this, "Backup saved", Toast.LENGTH_LONG).show()
+                    Toast.makeText(
+                        this, "Backup saved successfully", Toast.LENGTH_LONG
+                    ).show()
                 } catch (e: Exception) {
-                    Toast.makeText(this, "Could not save backup", Toast.LENGTH_LONG).show()
+                    Toast.makeText(
+                        this, "Could not save backup", Toast.LENGTH_LONG
+                    ).show()
                 }
             }
             pendingBackup = null
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        webView.saveState(outState)
+    }
+
+    @Deprecated("Deprecated in Android API")
     override fun onBackPressed() {
         if (::webView.isInitialized && webView.canGoBack()) {
             webView.goBack()
